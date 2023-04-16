@@ -17,9 +17,9 @@ __all__ = ["load_uav_rgbt_instances", "register_uav_rgbt"]
 CLASS_NAMES = (
     "person", "dog0", "bicycle", "sports ball", "car",  "boat", "motorcycle", "truck", "baby carriage",  "bus",  
 )
-CLASS_NAMES = (
-    "person", "car",  "motorcycle" 
-)
+# CLASS_NAMES = (
+#     "person", "car",  "motorcycle" 
+# )
 # fmt: on
 
 
@@ -60,12 +60,13 @@ def load_uav_rgbt_instances(dirname: str, split: str, class_names: Union[List[st
 
         for obj in tree.findall("object"):
             cls = obj.find("name").text
-            if cls == 'truck' or cls ==  "bus":
-                cls = "car"
+            # if cls == 'truck' or cls ==  "bus":
+            #     cls = "car"
             if cls not in CLASS_NAMES:
                 continue
-            # if CLASS_NAMES.index(cls)  <= 5 and 'val' in split:
-            #     continue
+
+            if CLASS_NAMES.index(cls)  > 5 and 'trainval' in split:
+                continue
             # split data 
             
             # We include "difficult" samples in training.

@@ -1,17 +1,16 @@
 _BASE_: "../Base-RCNN-C4.yaml"
 MODEL:
-  # SAVE_PATH : "./cls_tensor/mask_0.json"
-  META_ARCHITECTURE: "GeneralizedRCNN"
+  SAVE_PATH : "./cls_tensor/mask_3_one.json"
+  LOAD_PATH : "./cls_tensor/mask_2_one.json"
+  META_ARCHITECTURE: "GeneralizedRCNNIODDISFIX"
   PIXEL_MEAN: [123.675, 116.280, 103.530, 92.806, 92.806, 92.806]
   PIXEL_STD: [58.395, 57.120, 57.375, 34.796, 34.796, 34.796]
-  #PIXEL_MEAN: [123.675, 116.280, 103.530, 0.363945, 0.363945, 0.363945]
-  #PIXEL_STD: [58.395, 57.120, 57.375, 0.13645676, 0.13645676, 0.13645676]
-  TASK: 0
+  TASK: 2
   FEATS : "./cls_tensor/domain.pt"
   BACKBONE:
-    NAME: "build_two_resnet_fpn_backbone"
+    NAME: "build_two_iod_resnet_onefpn_backbone"
   # WEIGHTS: "detectron2://ImageNetPretrained/MSRA/R-50.pkl"
-  WEIGHTS: "./model_exchange.pth" 
+  WEIGHTS: "./output_gate_2_one/model_final.pth" 
   MASK_ON: False
   RESNETS:
     DEPTH: 50
@@ -36,6 +35,7 @@ MODEL:
   ROI_HEADS:
     NAME: "StandardROIHeads"
     NUM_CLASSES: 10
+    # CUR_NUM_CLASSES: 6
     IN_FEATURES: ["p2", "p3", "p4", "p5"]
     POSITIVE_FRACTION: 0.25
     NMS_THRESH_TEST: 0.3
@@ -46,22 +46,21 @@ MODEL:
   
 SEED: 40244023
 TEST:
-  EVAL_PERIOD: 9000
+  EVAL_PERIOD: 1000
 SOLVER:
   IMS_PER_BATCH: 8
-  BASE_LR: 0.02
-  STEPS: (2000, 6000)
-  MAX_ITER: 8000
-  CHECKPOINT_PERIOD: 2000
+  BASE_LR: 0.01
+  STEPS: (1000, 3000)
+  MAX_ITER: 4000
+  CHECKPOINT_PERIOD: 1000
   # WARMUP_ITERS: 100
   # LR_SCHEDULER_NAME: WarmupMultiStepLR
 INPUT:
   MIN_SIZE_TRAIN: (640, 672, 704, 736, 768, 800)
 VERSION: 2
 DATASETS:
-  TRAIN: ('uav_rgbt_trainval', )
-  TEST: ('uav_rgbt_testall',)
+  TRAIN: ('uav_rgbt_night', )
+  TEST: ('uav_rgbt_test',)
 
-
-OUTPUT_DIR: ./output_gate_0_dis
+OUTPUT_DIR: ./output_gate_3_one
   

@@ -1,6 +1,5 @@
 # output dir
-output_gate_0/
-output_gate_1/
+output_*/
 res/
 model_exchange.pth
 *.png

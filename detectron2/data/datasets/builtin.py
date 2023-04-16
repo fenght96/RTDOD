@@ -274,12 +274,15 @@ def register_all_pascal_voc(root):
         ("voc_2012_train", "VOC2012", "train"),
         ("voc_2012_val", "VOC2012", "val"),
         ("uav_rgbt_trainval", "uav", "trainval"),
+        ("uav_rgbt_trainbase", "uav", "train_base"),
+        ("uav_rgbt_trainnovel", "uav", "trainnovel"),
         ("uav_rgbt_day", "uav", "day"),
         ("uav_rgbt_evening", "uav", "evening"),
         ("uav_rgbt_foggy", "uav", "foggy"),
         ("uav_rgbt_night", "uav", "night"),
         ("uav_rgbt_rain", "uav", "rain"),
         ("uav_rgbt_test", "uav", "test"),
+        ("uav_rgbt_testall", "uav", "testall"),
         ("rgbt_trainval", "rgbt", "trainval"),
     ]
     for name, dirname, split in SPLITS:

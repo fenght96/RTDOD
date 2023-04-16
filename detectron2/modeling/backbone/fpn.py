@@ -13,7 +13,7 @@ from .resnet import build_resnet_backbone
 from .resnet_mask import build_resnet_mask_backbone
 
 
-__all__ = ["build_resnet_fpn_backbone", "build_retinanet_resnet_fpn_backbone", "build_two_resnet_fpn_backbone", "FPN"]
+__all__ = ["build_resnet_fpn_backbone", "build_retinanet_resnet_fpn_backbone", "build_two_resnet_fpn_backbone", "build_two_cod_resnet_backbone", "build_two_dod_resnet_backbone", "FPN"]
 
 
 class FPN(Backbone):
@@ -370,7 +370,7 @@ class FPN_Two_Fusion(Backbone):
                 ones. It can be "sum" (default), which sums up element-wise; or "avg",
                 which takes the element-wise mean of the two.
         """
-        super(FPN_Two, self).__init__()
+        super(FPN_Two_Fusion, self).__init__()
         # Feature map strides and channels from the bottom up network (e.g. ResNet)
         input_shapes = bottom_up_rgb.output_shape()
         strides = [input_shapes[f].stride for f in in_features]
@@ -510,7 +510,7 @@ class FPN_Two_Fusion(Backbone):
             for name in self._out_features
         }
 
-
+# for class incremental
 class FPN_Two_Fusion_Mask(Backbone):
     """
     This module implements :paper:`FPN`.
@@ -633,12 +633,13 @@ class FPN_Two_Fusion_Mask(Backbone):
         self.cls_fcs_2 = nn.ModuleList()
         self.cls_feats = cls_feats #torch.load("./cls_tensor/10_6_4.pt").cuda().float()
         in_c = self.cls_feats.shape[-1]
+        bs = self.cls_feats.shape[0]
         for _ in range(len(self._out_features)):
             self.cls_fcs_1.append(
                 nn.Linear(in_c, embed_features),
                 )
             self.cls_fcs_2.append(
-                nn.Linear(embed_features, out_channels)
+                nn.Linear(embed_features*bs, out_channels)
                 )
         
     
@@ -687,7 +688,7 @@ class FPN_Two_Fusion_Mask(Backbone):
                     wt = F.relu(self.trm_fc[i](F.relu(torch.mean((bottom_up_trm[keys[-1]]*pre_masks[7][j]).view(bs,c,-1),-1).view(bs,c))))
                     # bottom_up_gate_num += 1
                     w = F.softmax(F.relu(self.fc_mix_w(torch.cat([wr,wt],dim=1))), dim=1)
-                    bottom_up_features[k].append(w[:,0].view(bs,1,1,1) * v*pre_masks[i][j] + w[:,1].view(bs,1,1,1) * bottom_up_trm[k]*pre_masks[i+4][j])
+                    bottom_up_features[k].append(w[:,0].view(bs,1,1,1) * v * pre_masks[i][j] + w[:,1].view(bs,1,1,1) * bottom_up_trm[k]*pre_masks[i+4][j])
                 i += 1
 
             bottom_up_gate_num = 8
@@ -729,13 +730,20 @@ class FPN_Two_Fusion_Mask(Backbone):
                 wr = F.relu(self.rgb_fc[i](F.relu(torch.mean((bottom_up_rgb[keys[-1]]*rgb_masks[-1]).view(bs,c,-1),-1).view(bs,c))))
                 wt = F.relu(self.trm_fc[i](F.relu(torch.mean((bottom_up_trm[keys[-1]]*trm_masks[-1]).view(bs,c,-1),-1).view(bs,c))))
                 w = F.softmax(F.relu(self.fc_mix_w(torch.cat([wr,wt],dim=1))), dim=1)
+                # for class incremental
                 bottom_up_features[k].append(w[:,0].view(bs,1,1,1) * v * rgb_masks[i]  + w[:,1].view(bs,1,1,1) * bottom_up_trm[k] * trm_masks[i])
+                # for domain incremental
+                # bottom_up_features[k].append(w[:,0].view(bs,1,1,1) * v * (1 - rgb_masks[i])  + w[:,1].view(bs,1,1,1) * bottom_up_trm[k] *(1 - trm_masks[i]))
                 if pre_masks is not None:
                     for j in range(len(pre_masks[0])):
                         wr = F.relu(self.rgb_fc[i](F.relu(torch.mean((bottom_up_rgb[keys[-1]]*pre_masks[3][j]).view(bs,c,-1),-1).view(bs,c))))
                         wt = F.relu(self.trm_fc[i](F.relu(torch.mean((bottom_up_trm[keys[-1]]*pre_masks[7][j]).view(bs,c,-1),-1).view(bs,c))))
                         w = F.softmax(F.relu(self.fc_mix_w(torch.cat([wr,wt],dim=1))), dim=1)
+                        # for class incremental
                         bottom_up_features[k].append(w[:,0].view(bs,1,1,1) * v * pre_masks[i][j]  + w[:,1].view(bs,1,1,1) * bottom_up_trm[k] * pre_masks[i+4][j])
+                        # for domain incremental
+                        # bottom_up_features[k].append(w[:,0].view(bs,1,1,1) * v * (1 - pre_masks[i][j])  + w[:,1].view(bs,1,1,1) * bottom_up_trm[k] * (1 - pre_masks[i+4][j]))
+
                 i += 1
 
             # outputs{name:[cur_features, old_features]}, div_loss=float, task_masks=[gate0, gate1...]
@@ -813,6 +821,526 @@ class FPN_Two_Fusion_Mask(Backbone):
             results = dict(list(zip(self._out_features, results)))
             outs.append(results) # [n_task, {origin_results}]
         return outs
+
+
+
+    def output_shape(self):
+        return {
+            name: ShapeSpec(
+                channels=self._out_feature_channels[name], stride=self._out_feature_strides[name]
+            )
+            for name in self._out_features
+        }
+
+# for domain incremental
+class FPN_Two_Fusion_OneMask(Backbone):
+    """
+    This module implements :paper:`FPN`.
+    It creates pyramid features built on top of some input feature maps.
+    """
+
+    def __init__(
+        self, bottom_up_rgb, bottom_up_trm, in_features, out_channels, norm="", top_block=None, fuse_type="sum",
+    ):
+        """
+        Args:
+            bottom_up (Backbone): module representing the bottom up subnetwork.
+                Must be a subclass of :class:`Backbone`. The multi-scale feature
+                maps generated by the bottom up network, and listed in `in_features`,
+                are used to generate FPN levels.
+            in_features (list[str]): names of the input feature maps coming
+                from the backbone to which FPN is attached. For example, if the
+                backbone produces ["res2", "res3", "res4"], any *contiguous* sublist
+                of these may be used; order must be from high to low resolution.
+            out_channels (int): number of channels in the output feature maps.
+            norm (str): the normalization to use.
+            top_block (nn.Module or None): if provided, an extra operation will
+                be performed on the output of the last (smallest resolution)
+                FPN output, and the result will extend the result list. The top_block
+                further downsamples the feature map. It must have an attribute
+                "num_levels", meaning the number of extra FPN levels added by
+                this block, and "in_feature", which is a string representing
+                its input feature (e.g., p5).
+            fuse_type (str): types for fusing the top down features and the lateral
+                ones. It can be "sum" (default), which sums up element-wise; or "avg",
+                which takes the element-wise mean of the two.
+        """
+        super(FPN_Two_Fusion_OneMask, self).__init__()
+        assert isinstance(bottom_up_rgb, Backbone)
+        assert isinstance(bottom_up_trm, Backbone)
+        assert in_features, in_features
+        
+
+
+        # Feature map strides and channels from the bottom up network (e.g. ResNet)
+        input_shapes = bottom_up_rgb.output_shape()
+        strides = [input_shapes[f].stride for f in in_features]
+        in_channels_per_feature = [input_shapes[f].channels for f in in_features]
+
+        _assert_strides_are_log2_contiguous(strides)
+        lateral_convs = []
+        output_convs = []
+        rgb_fc = []
+        trm_fc = []
+        fc_weight_c = 16
+
+        use_bias = norm == ""
+        for idx, in_channels in enumerate(in_channels_per_feature):
+            lateral_norm = get_norm(norm, out_channels)
+            output_norm = get_norm(norm, out_channels)
+
+            lateral_rgb_fc = nn.Linear(in_channels, fc_weight_c)
+            lateral_trm_fc = nn.Linear(in_channels, fc_weight_c)
+
+            lateral_conv = Conv2d(
+                in_channels, out_channels, kernel_size=1, bias=use_bias, norm=lateral_norm
+            )
+            output_conv = Conv2d(
+                out_channels,
+                out_channels,
+                kernel_size=3,
+                stride=1,
+                padding=1,
+                bias=use_bias,
+                norm=output_norm,
+            )
+            weight_init.c2_xavier_fill(lateral_conv)
+            weight_init.c2_xavier_fill(output_conv)
+            stage = int(math.log2(strides[idx]))
+            self.add_module("fpn_lateral{}".format(stage), lateral_conv)
+            self.add_module("fpn_output{}".format(stage), output_conv)
+
+            self.add_module("fpn_lateral_trm_fc{}".format(stage), lateral_trm_fc)
+            self.add_module("fpn_lateral_rgb_fc{}".format(stage), lateral_rgb_fc)
+
+
+            lateral_convs.append(lateral_conv)
+            output_convs.append(output_conv)
+            trm_fc.append(lateral_trm_fc)
+            rgb_fc.append(lateral_rgb_fc)
+        # Place convs into top-down order (from low to high resolution)
+        # to make the top-down computation in forward clearer.
+        self.lateral_convs = lateral_convs[::-1]
+        self.output_convs = output_convs[::-1]
+        self.top_block = top_block
+        self.in_features = in_features
+        self.bottom_up_rgb = bottom_up_rgb
+        self.bottom_up_trm = bottom_up_trm
+
+        self.rgb_fc = rgb_fc
+        self.trm_fc = trm_fc
+        self.fc_mix_w = nn.Linear(2 * fc_weight_c, 2)
+        self.add_module("fpn_fc", self.fc_mix_w)
+
+
+        # Return feature names are "p<stage>", like ["p2", "p3", ..., "p6"]
+        self._out_feature_strides = {"p{}".format(int(math.log2(s))): s for s in strides}
+        # top block output feature maps.
+        if self.top_block is not None:
+            for s in range(stage, stage + self.top_block.num_levels):
+                self._out_feature_strides["p{}".format(s + 1)] = 2 ** (s + 1)
+
+        self._out_features = list(self._out_feature_strides.keys())
+        self._out_feature_channels = {k: out_channels for k in self._out_features}
+        self._size_divisibility = strides[-1]
+        assert fuse_type in {"avg", "sum"}
+        self._fuse_type = fuse_type
+
+        # Scripting does not support this: https://github.com/pytorch/pytorch/issues/47334
+        # have to do it in __init__ instead.
+        self.rev_in_features = tuple(in_features[::-1])
+
+        # self.cls_fcs_1 = nn.ModuleList()
+        # self.cls_fcs_2 = nn.ModuleList()
+        # self.cls_feats = cls_feats #torch.load("./cls_tensor/10_6_4.pt").cuda().float()
+        # in_c = self.cls_feats.shape[-1]
+        # for _ in range(len(self._out_features)):
+        #     self.cls_fcs_1.append(
+        #         nn.Linear(in_c, embed_features),
+        #         )
+        #     self.cls_fcs_2.append(
+        #         nn.Linear(embed_features, out_channels)
+        #         )
+        
+    
+
+    @property
+    def size_divisibility(self):
+        return self._size_divisibility
+
+    def forward(self, x, pre_masks=None):
+        """
+        Args:
+            input (dict[str->Tensor]): mapping feature map name (e.g., "res5") to
+                feature map tensor for each feature level in high to low resolution order.
+
+        Returns:
+            dict[str->Tensor]:
+                mapping from feature map name to FPN feature map tensor
+                in high to low resolution order. Returned feature names follow the FPN
+                paper convention: "p<stage>", where stage has stride = 2 ** stage e.g.,
+                ["p2", "p3", ..., "p6"].
+        """
+        if not self.training:
+            bottom_up_rgb = self.bottom_up_rgb(x[:,:3,:,:])['feats']
+            bottom_up_trm = self.bottom_up_trm(x[:,3:,:,:])['feats']
+            bottom_up_gate_num = 0
+
+
+            bottom_up_features = {}
+            i = 0
+            bs = x.shape[0]
+            keys = list(bottom_up_rgb.keys())
+            for k,v in bottom_up_rgb.items():
+                bottom_up_features[k] = []
+                c = v.shape[1]
+                # import pdb; pdb.set_trace()
+                for j in range(len(pre_masks[3])):
+                    wr = F.relu(self.rgb_fc[i](F.relu(torch.mean((bottom_up_rgb[keys[-1]]*pre_masks[3][j]).view(bs,c,-1),-1).view(bs,c))))
+                    # bottom_up_gate_num += 1
+                    wt = F.relu(self.trm_fc[i](F.relu(torch.mean((bottom_up_trm[keys[-1]]*pre_masks[7][j]).view(bs,c,-1),-1).view(bs,c))))
+                    # bottom_up_gate_num += 1
+                    w = F.softmax(F.relu(self.fc_mix_w(torch.cat([wr,wt],dim=1))), dim=1)
+                    bottom_up_features[k].append(w[:,0].view(bs,1,1,1) * v * (1 - pre_masks[i][j]) + w[:,1].view(bs,1,1,1) * bottom_up_trm[k]*(1 - pre_masks[i+4][j]))
+                i += 1
+            bottom_up_gate_num = 8
+            results = self.fpn_features(bottom_up_features)
+            return [results,], bottom_up_features, None
+        else:
+            bottom_up_rgb = self.bottom_up_rgb(x[:,:3,:,:])
+            rgb_masks = bottom_up_rgb['mask']
+            bottom_up_rgb = bottom_up_rgb['feats']
+            bottom_up_trm = self.bottom_up_trm(x[:,3:,:,:])
+            trm_masks = bottom_up_trm['mask']
+            bottom_up_trm = bottom_up_trm['feats']
+            task_masks = rgb_masks + trm_masks
+
+
+            bottom_up_features = {}
+            i = 0
+            bs = x.shape[0]
+            keys = list(bottom_up_rgb.keys())
+            for k,v in bottom_up_rgb.items():
+                bottom_up_features[k] = []
+                # import pdb; pdb.set_trace()
+                # for j,v in enumerate(vs):
+                c = v.shape[1]
+                wr = F.relu(self.rgb_fc[i](F.relu(torch.mean((bottom_up_rgb[keys[-1]]*rgb_masks[-1]).view(bs,c,-1),-1).view(bs,c))))
+                wt = F.relu(self.trm_fc[i](F.relu(torch.mean((bottom_up_trm[keys[-1]]*trm_masks[-1]).view(bs,c,-1),-1).view(bs,c))))
+                w = F.softmax(F.relu(self.fc_mix_w(torch.cat([wr,wt],dim=1))), dim=1)
+                # for class incremental
+                # bottom_up_features[k].append(w[:,0].view(bs,1,1,1) * v * rgb_masks[i]  + w[:,1].view(bs,1,1,1) * bottom_up_trm[k] * trm_masks[i])
+                # for domain incremental
+                bottom_up_features[k].append(w[:,0].view(bs,1,1,1) * v * (1 - rgb_masks[i])  + w[:,1].view(bs,1,1,1) * bottom_up_trm[k] *(1 - trm_masks[i]))
+                if pre_masks is not None:
+                    for j in range(len(pre_masks[0])):
+                        wr = F.relu(self.rgb_fc[i](F.relu(torch.mean((bottom_up_rgb[keys[-1]]*pre_masks[3][j]).view(bs,c,-1),-1).view(bs,c))))
+                        wt = F.relu(self.trm_fc[i](F.relu(torch.mean((bottom_up_trm[keys[-1]]*pre_masks[7][j]).view(bs,c,-1),-1).view(bs,c))))
+                        w = F.softmax(F.relu(self.fc_mix_w(torch.cat([wr,wt],dim=1))), dim=1)
+                        # for class incremental
+                        # bottom_up_features[k].append(w[:,0].view(bs,1,1,1) * v * pre_masks[i][j]  + w[:,1].view(bs,1,1,1) * bottom_up_trm[k] * pre_masks[i+4][j])
+                        # for domain incremental
+                        bottom_up_features[k].append(w[:,0].view(bs,1,1,1) * v * (1 - pre_masks[i][j])  + w[:,1].view(bs,1,1,1) * bottom_up_trm[k] * (1 - pre_masks[i+4][j]))
+
+                i += 1
+
+            # outputs{name:[cur_features, old_features]}, div_loss=float, task_masks=[gate0, gate1...]
+            # div_loss = rgb_dloss + trm_dloss  
+            # bottom_up_gate_num = len(task_masks)
+            # if pre_masks is not None:
+            #     task_num = len(pre_masks[bottom_up_gate_num]) + 1
+            results = self.fpn_features(bottom_up_features) # [cur_result, task0_result, 1_result]
+            return [results,], bottom_up_features, task_masks
+        
+    def change_shape(self, outs):
+        results = [[] for _ in self._out_features]
+        for out in outs:
+            for i,o in enumerate(out):
+                results[i].append(o)
+        assert len(self._out_features) == len(results)
+        return results
+        
+    def fpn_features(self, bottom_up_features):
+        outs = []
+        bottom_up_features_dict = {}
+        for k,v in bottom_up_features.items():
+            bottom_up_features_dict[k] = sum(v) / len(v)
+        
+            
+        results = []
+        prev_features = self.lateral_convs[0](bottom_up_features_dict[self.in_features[-1]])
+        results.append(self.output_convs[0](prev_features))
+
+        # Reverse feature maps into top-down order (from low to high resolution)
+        for features, lateral_conv, output_conv in zip(
+            self.rev_in_features[1:], self.lateral_convs[1:], self.output_convs[1:]
+        ):
+            features = bottom_up_features_dict[features]
+            top_down_features = F.interpolate(prev_features, scale_factor=2.0, mode="nearest")
+            # Has to use explicit forward due to https://github.com/pytorch/pytorch/issues/47336
+            lateral_features = lateral_conv.forward(features)
+            prev_features = lateral_features + top_down_features
+            if self._fuse_type == "avg":
+                prev_features /= 2
+            results.insert(0, output_conv.forward(prev_features))
+
+        if self.top_block is not None:
+            if self.top_block.in_feature in bottom_up_features_dict:
+                top_block_in_feature = bottom_up_features_dict[self.top_block.in_feature]
+            else:
+                top_block_in_feature = results[self._out_features.index(self.top_block.in_feature)]
+            results.extend(self.top_block(top_block_in_feature))
+        results = dict(list(zip(self._out_features, results)))
+            # outs.append(results) # [n_task, {origin_results}]
+        return results
+
+
+
+    def output_shape(self):
+        return {
+            name: ShapeSpec(
+                channels=self._out_feature_channels[name], stride=self._out_feature_strides[name]
+            )
+            for name in self._out_features
+        }
+
+
+# for gen dis
+class FPN_Two_Fusion_WoMask(Backbone):
+    """
+    This module implements :paper:`FPN`.
+    It creates pyramid features built on top of some input feature maps.
+    """
+
+    def __init__(
+        self, bottom_up_rgb, bottom_up_trm, in_features, out_channels, norm="", top_block=None, fuse_type="sum"
+    ):
+        """
+        Args:
+            bottom_up (Backbone): module representing the bottom up subnetwork.
+                Must be a subclass of :class:`Backbone`. The multi-scale feature
+                maps generated by the bottom up network, and listed in `in_features`,
+                are used to generate FPN levels.
+            in_features (list[str]): names of the input feature maps coming
+                from the backbone to which FPN is attached. For example, if the
+                backbone produces ["res2", "res3", "res4"], any *contiguous* sublist
+                of these may be used; order must be from high to low resolution.
+            out_channels (int): number of channels in the output feature maps.
+            norm (str): the normalization to use.
+            top_block (nn.Module or None): if provided, an extra operation will
+                be performed on the output of the last (smallest resolution)
+                FPN output, and the result will extend the result list. The top_block
+                further downsamples the feature map. It must have an attribute
+                "num_levels", meaning the number of extra FPN levels added by
+                this block, and "in_feature", which is a string representing
+                its input feature (e.g., p5).
+            fuse_type (str): types for fusing the top down features and the lateral
+                ones. It can be "sum" (default), which sums up element-wise; or "avg",
+                which takes the element-wise mean of the two.
+        """
+        super(FPN_Two_Fusion_WoMask, self).__init__()
+        assert isinstance(bottom_up_rgb, Backbone)
+        assert isinstance(bottom_up_trm, Backbone)
+        assert in_features, in_features
+        
+
+
+        # Feature map strides and channels from the bottom up network (e.g. ResNet)
+        input_shapes = bottom_up_rgb.output_shape()
+        strides = [input_shapes[f].stride for f in in_features]
+        in_channels_per_feature = [input_shapes[f].channels for f in in_features]
+
+        _assert_strides_are_log2_contiguous(strides)
+        lateral_convs = []
+        output_convs = []
+        rgb_fc = []
+        trm_fc = []
+        fc_weight_c = 16
+
+        use_bias = norm == ""
+        for idx, in_channels in enumerate(in_channels_per_feature):
+            lateral_norm = get_norm(norm, out_channels)
+            output_norm = get_norm(norm, out_channels)
+
+            lateral_rgb_fc = nn.Linear(in_channels, fc_weight_c)
+            lateral_trm_fc = nn.Linear(in_channels, fc_weight_c)
+
+            lateral_conv = Conv2d(
+                in_channels, out_channels, kernel_size=1, bias=use_bias, norm=lateral_norm
+            )
+            output_conv = Conv2d(
+                out_channels,
+                out_channels,
+                kernel_size=3,
+                stride=1,
+                padding=1,
+                bias=use_bias,
+                norm=output_norm,
+            )
+            weight_init.c2_xavier_fill(lateral_conv)
+            weight_init.c2_xavier_fill(output_conv)
+            stage = int(math.log2(strides[idx]))
+            self.add_module("fpn_lateral{}".format(stage), lateral_conv)
+            self.add_module("fpn_output{}".format(stage), output_conv)
+
+            self.add_module("fpn_lateral_trm_fc{}".format(stage), lateral_trm_fc)
+            self.add_module("fpn_lateral_rgb_fc{}".format(stage), lateral_rgb_fc)
+
+
+            lateral_convs.append(lateral_conv)
+            output_convs.append(output_conv)
+            trm_fc.append(lateral_trm_fc)
+            rgb_fc.append(lateral_rgb_fc)
+        # Place convs into top-down order (from low to high resolution)
+        # to make the top-down computation in forward clearer.
+        self.lateral_convs = lateral_convs[::-1]
+        self.output_convs = output_convs[::-1]
+        self.top_block = top_block
+        self.in_features = in_features
+        self.bottom_up_rgb = bottom_up_rgb
+        self.bottom_up_trm = bottom_up_trm
+
+        self.rgb_fc = rgb_fc
+        self.trm_fc = trm_fc
+        self.fc_mix_w = nn.Linear(2 * fc_weight_c, 2)
+        self.add_module("fpn_fc", self.fc_mix_w)
+
+
+        # Return feature names are "p<stage>", like ["p2", "p3", ..., "p6"]
+        self._out_feature_strides = {"p{}".format(int(math.log2(s))): s for s in strides}
+        # top block output feature maps.
+        if self.top_block is not None:
+            for s in range(stage, stage + self.top_block.num_levels):
+                self._out_feature_strides["p{}".format(s + 1)] = 2 ** (s + 1)
+
+        self._out_features = list(self._out_feature_strides.keys())
+        self._out_feature_channels = {k: out_channels for k in self._out_features}
+        self._size_divisibility = strides[-1]
+        assert fuse_type in {"avg", "sum"}
+        self._fuse_type = fuse_type
+
+        # Scripting does not support this: https://github.com/pytorch/pytorch/issues/47334
+        # have to do it in __init__ instead.
+        self.rev_in_features = tuple(in_features[::-1])
+
+        # self.cls_fcs_1 = nn.ModuleList()
+        # self.cls_fcs_2 = nn.ModuleList()
+        # self.cls_feats = cls_feats #torch.load("./cls_tensor/10_6_4.pt").cuda().float()
+        # in_c = self.cls_feats.shape[-1]
+        # for _ in range(len(self._out_features)):
+        #     self.cls_fcs_1.append(
+        #         nn.Linear(in_c, embed_features),
+        #         )
+        #     self.cls_fcs_2.append(
+        #         nn.Linear(embed_features, out_channels)
+        #         )
+        
+    
+
+    @property
+    def size_divisibility(self):
+        return self._size_divisibility
+
+    def forward(self, x):
+        """
+        Args:
+            input (dict[str->Tensor]): mapping feature map name (e.g., "res5") to
+                feature map tensor for each feature level in high to low resolution order.
+
+        Returns:
+            dict[str->Tensor]:
+                mapping from feature map name to FPN feature map tensor
+                in high to low resolution order. Returned feature names follow the FPN
+                paper convention: "p<stage>", where stage has stride = 2 ** stage e.g.,
+                ["p2", "p3", ..., "p6"].
+        """
+        if not self.training:
+            
+            bottom_up_rgb = self.bottom_up_rgb(x[:,:3,:,:])
+            bottom_up_trm = self.bottom_up_trm(x[:,3:,:,:])
+            bottom_up_gate_num = 0
+
+
+            bottom_up_features = {}
+            bs = x.shape[0]
+            i = 0
+            keys = list(bottom_up_rgb.keys())
+            for k,v in bottom_up_rgb.items():
+                bottom_up_features[k] = []
+                c = v.shape[1]
+                wr = F.relu(self.rgb_fc[i](F.relu(torch.mean((bottom_up_rgb[keys[-1]]).view(bs,c,-1),-1).view(bs,c))))
+                # bottom_up_gate_num += 1
+                wt = F.relu(self.trm_fc[i](F.relu(torch.mean((bottom_up_trm[keys[-1]]).view(bs,c,-1),-1).view(bs,c))))
+                # bottom_up_gate_num += 1
+                w = F.softmax(F.relu(self.fc_mix_w(torch.cat([wr,wt],dim=1))), dim=1)
+                bottom_up_features[k]= w[:,0].view(bs,1,1,1) * v + w[:,1].view(bs,1,1,1)
+                i += 1
+            results = self.fpn_features(bottom_up_features)
+            # results = self.change_shape(results)
+            return [results,], bottom_up_features
+        else:
+            bottom_up_rgb = self.bottom_up_rgb(x[:,:3,:,:])
+            bottom_up_trm = self.bottom_up_trm(x[:,3:,:,:])
+            
+
+
+            bottom_up_features = {}
+            bs = x.shape[0]
+            i = 0
+            keys = list(bottom_up_rgb.keys())
+            for k,v in bottom_up_rgb.items():
+                bottom_up_features[k] = []
+                # import pdb; pdb.set_trace()
+                # for j,v in enumerate(vs):
+                c = v.shape[1]
+                wr = F.relu(self.rgb_fc[i](F.relu(torch.mean((bottom_up_rgb[keys[-1]]).view(bs,c,-1),-1).view(bs,c))))
+                wt = F.relu(self.trm_fc[i](F.relu(torch.mean((bottom_up_trm[keys[-1]]).view(bs,c,-1),-1).view(bs,c))))
+                w = F.softmax(F.relu(self.fc_mix_w(torch.cat([wr,wt],dim=1))), dim=1)
+                # for class incremental
+                # bottom_up_features[k].append(w[:,0].view(bs,1,1,1) * v * rgb_masks[i]  + w[:,1].view(bs,1,1,1) * bottom_up_trm[k] * trm_masks[i])
+                # for domain incremental
+                bottom_up_features[k] = w[:,0].view(bs,1,1,1) * v  + w[:,1].view(bs,1,1,1) * bottom_up_trm[k]
+                i += 1
+            results = self.fpn_features(bottom_up_features) # [cur_result, task0_result, 1_result]
+            return [results,], bottom_up_features
+        
+    def change_shape(self, outs):
+        results = [[] for _ in self._out_features]
+        for out in outs:
+            for i,o in enumerate(out):
+                results[i].append(o)
+        assert len(self._out_features) == len(results)
+        return results
+        
+    def fpn_features(self, bottom_up_features):
+        outs = []
+        bottom_up_features_dict = bottom_up_features
+       
+        results = []
+        prev_features = self.lateral_convs[0](bottom_up_features_dict[self.in_features[-1]])
+        results.append(self.output_convs[0](prev_features))
+
+        # Reverse feature maps into top-down order (from low to high resolution)
+        for features, lateral_conv, output_conv in zip(
+            self.rev_in_features[1:], self.lateral_convs[1:], self.output_convs[1:]
+        ):
+            features = bottom_up_features_dict[features]
+            top_down_features = F.interpolate(prev_features, scale_factor=2.0, mode="nearest")
+            # Has to use explicit forward due to https://github.com/pytorch/pytorch/issues/47336
+            lateral_features = lateral_conv.forward(features)
+            prev_features = lateral_features + top_down_features
+            if self._fuse_type == "avg":
+                prev_features /= 2
+            results.insert(0, output_conv.forward(prev_features))
+
+        if self.top_block is not None:
+            if self.top_block.in_feature in bottom_up_features_dict:
+                top_block_in_feature = bottom_up_features_dict[self.top_block.in_feature]
+            else:
+                top_block_in_feature = results[self._out_features.index(self.top_block.in_feature)]
+            results.extend(self.top_block(top_block_in_feature))
+        results = dict(list(zip(self._out_features, results)))
+        return results
 
 
 
@@ -907,7 +1435,7 @@ def build_two_resnet_fpn_backbone(cfg, input_shape: ShapeSpec):
     bottom_up_trm= build_resnet_backbone(cfg, input_shape)
     in_features = cfg.MODEL.FPN.IN_FEATURES
     out_channels = cfg.MODEL.FPN.OUT_CHANNELS
-    backbone = FPN_Two(
+    backbone = FPN_Two_Fusion_WoMask(
         bottom_up_rgb=bottom_up_rgb,
         bottom_up_trm=bottom_up_trm,
         in_features=in_features,
@@ -920,7 +1448,7 @@ def build_two_resnet_fpn_backbone(cfg, input_shape: ShapeSpec):
 
 
 @BACKBONE_REGISTRY.register()
-def build_two_iod_resnet_fpn_backbone(cfg, input_shape: ShapeSpec):
+def build_two_cod_resnet_backbone(cfg, input_shape: ShapeSpec):
     """
     Args:
         cfg: a detectron2 CfgNode
@@ -928,7 +1456,7 @@ def build_two_iod_resnet_fpn_backbone(cfg, input_shape: ShapeSpec):
     Returns:
         backbone (Backbone): backbone module, must be a subclass of :class:`Backbone`.
     """
-    cls_feats = torch.load(cfg.MODEL.FEATS).cuda().float()[cfg.MODEL.TASK].unsqueeze(0)
+    cls_feats = torch.load(cfg.MODEL.FEATS).cuda().float()[:cfg.MODEL.ROI_HEADS.CUR_NUM_CLASSES]
     bottom_up_rgb= build_resnet_mask_backbone(cfg, input_shape, cls_feats=cls_feats)
     bottom_up_trm= build_resnet_mask_backbone(cfg, input_shape, cls_feats=cls_feats)
     in_features = cfg.MODEL.FPN.IN_FEATURES
@@ -946,7 +1474,31 @@ def build_two_iod_resnet_fpn_backbone(cfg, input_shape: ShapeSpec):
     )
     return backbone
 
+@BACKBONE_REGISTRY.register()
+def build_two_dod_resnet_backbone(cfg, input_shape: ShapeSpec):
+    """
+    Args:
+        cfg: a detectron2 CfgNode
 
+    Returns:
+        backbone (Backbone): backbone module, must be a subclass of :class:`Backbone`.
+    """
+    cls_feats = torch.load(cfg.MODEL.FEATS).cuda().float()[cfg.MODEL.TASK].unsqueeze(0)
+    bottom_up_rgb= build_resnet_mask_backbone(cfg, input_shape, cls_feats=cls_feats)
+    bottom_up_trm= build_resnet_mask_backbone(cfg, input_shape, cls_feats=cls_feats)
+    in_features = cfg.MODEL.FPN.IN_FEATURES
+    out_channels = cfg.MODEL.FPN.OUT_CHANNELS
+    
+    backbone = FPN_Two_Fusion_OneMask(
+        bottom_up_rgb=bottom_up_rgb,
+        bottom_up_trm=bottom_up_trm,
+        in_features=in_features,
+        out_channels=out_channels,
+        norm=cfg.MODEL.FPN.NORM,
+        top_block=LastLevelMaxPool(),
+        fuse_type=cfg.MODEL.FPN.FUSE_TYPE,
+    )
+    return backbone
 
 @BACKBONE_REGISTRY.register()
 def build_retinanet_resnet_fpn_backbone(cfg, input_shape: ShapeSpec):

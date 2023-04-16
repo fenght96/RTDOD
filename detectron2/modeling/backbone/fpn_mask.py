@@ -25,7 +25,7 @@ class FPN_Mask(Backbone):
 
     def __init__(
         self, bottom_up, in_features, out_channels, norm="", top_block=None, fuse_type="sum",
-        embed_features=64, n_cls=10
+        embed_features=640
     ):
         """
         Args:
@@ -116,15 +116,15 @@ class FPN_Mask(Backbone):
 
         self.cls_fcs_1 = nn.ModuleList()
         self.cls_fcs_2 = nn.ModuleList()
-        self.cls_feats = torch.load('./cls_tensor/voc_tensor.pt').cuda().float()
-        self.cls_feats = self.cls_feats[n_cls:]
+        self.cls_feats = cls_feats#torch.load('./cls_tensor/voc_tensor.pt').cuda().float()
+        # self.cls_feats = self.cls_feats[n_cls:]
         in_c = self.cls_feats.shape[-1]
         for _ in range(len(self._out_features)):
             self.cls_fcs_1.append(
                 nn.Linear(in_c, embed_features),
                 )
             self.cls_fcs_2.append(
-                nn.Linear(embed_features * n_cls, out_channels)
+                nn.Linear(embed_features*in_c, out_channels)
                 )
         
     

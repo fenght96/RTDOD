@@ -1,0 +1,6 @@
+base_evening 41.26
+base_day 44.77
+base 7.92
+base_night 17.91
+ft 36.98
+ours  50.88

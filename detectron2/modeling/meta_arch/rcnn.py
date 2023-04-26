@@ -486,9 +486,11 @@ class GeneralizedRCNNMask(nn.Module):
                 proposals = [x["proposals"].to(self.device) for x in batched_inputs]
                 
             # Prediction.
-            _, detector_losses, gate,_ = self.roi_heads(images, features, proposals, gt_instances)
+            _, detector_losses, gates,_ = self.roi_heads(images, features, proposals, gt_instances)
             # proposals, losses, gate, pre_predictions        
-            task_masks += gate
+            # task_masks += gate
+            print(len(task_masks))
+            task_masks.append([gates,])
             loss_dict = {}
             loss_dict.update(detector_losses)
             loss_dict.update(proposal_losses)
@@ -499,22 +501,103 @@ class GeneralizedRCNNMask(nn.Module):
             pre_masks = self.load_task_masks(self.save_path)
             features, _, _ = self.backbone(images.tensor, pre_masks)# for testing:  [dict(list(zip(self._out_features, results))), None], 0, None
             # Prediction.
-            features = features[0]
-            # Prepare Proposals.
-            if self.proposal_generator is not None:
-                proposals, _ = self.proposal_generator(images, features, None)
-            else:
-                assert "proposals" in batched_inputs[0]
-                proposals = [x["proposals"].to(self.device) for x in batched_inputs]
+            # features = features[0]
+            # results = []
+            # for i, feat in enumerate(features):
+            #     # Prepare Proposals.
+            #     if self.proposal_generator is not None:
+            #         proposals, _ = self.proposal_generator(images, feat, None)
+            #     else:
+            #         assert "proposals" in batched_inputs[0]
+            #         proposals = [x["proposals"].to(self.device) for x in batched_inputs]
+            #     result = self.roi_heads(images, feat, proposals, pre_mask=pre_masks[-1][i])
             
-            results, _  = self.roi_heads(images, features, proposals)
+            #     if do_postprocess:
+            #         assert not torch.jit.is_scripting(), "Scripting is not supported for postprocess."
+            #         return GeneralizedRCNN._postprocess(result, batched_inputs, images.image_sizes)
+            #     else:
+            #         return result
+            results = []            
+            for i, feature in enumerate(features):
+                # Prepare Proposals.
+                if self.proposal_generator is not None:
+                    proposals, _ = self.proposal_generator(images, feature, None)
+                else:
+                    assert "proposals" in batched_inputs[0]
+                    proposals = [x["proposals"].to(self.device) for x in batched_inputs]
+                for j in range(len(pre_masks[-1][i])):
+                    result = self.roi_heads(images, feature, proposals, None, pre_masks[-1][i][j])
+                    results.append(result)
             # import pdb; pdb.set_trace()
             if do_postprocess:
-                assert not torch.jit.is_scripting(), "Scripting is not supported for postprocess."
-                return GeneralizedRCNN._postprocess(results, batched_inputs, images.image_sizes)
+                processed_results = []
+                for result in results:# [N for task [bs * outputs]]
+                    for results_per_image, input_per_image, image_size in zip(result, batched_inputs, images.image_sizes):
+                        height = input_per_image.get("height", image_size[0])
+                        width = input_per_image.get("width", image_size[1])
+                        r = detector_postprocess(results_per_image[0], height, width)
+                        processed_results.append({"instances": r})
+                # multi instances to one instance
+                processed_results = self.merge_results(processed_results)
+                return processed_results
             else:
                 return results
 
+    def merge_results(self, results):
+        saved_boxes = None
+        saved_cls = None
+        saved_scores = None
+        
+        for result in results:
+            result = result['instances']
+            if len(result) <= 0:
+                continue
+            scores = result.get('scores')
+            pred_boxes = result.get('pred_boxes').tensor
+            pred_classes = result.get('pred_classes')
+            if saved_boxes is None:
+                saved_boxes = pred_boxes
+                saved_cls = pred_classes
+                saved_scores = scores
+            else:
+                saved_boxes = torch.cat([saved_boxes, pred_boxes],dim=0)
+                saved_cls = torch.cat([saved_cls, pred_classes],dim=0)
+                saved_scores = torch.cat([saved_scores, scores],dim=0)
+        if isinstance(saved_boxes, torch.Tensor):
+            pred = Instances(results[0]['instances']._image_size, **{'pred_boxes': Boxes(saved_boxes), 'pred_classes': saved_cls, 'scores':saved_scores}) 
+        else:
+            pred = Instances(results[0]['instances']._image_size, **{'pred_boxes': Boxes(torch.tensor([]).to(self.device)), 'pred_classes': torch.tensor([]).to(self.device), "scores": torch.tensor([])}) 
+        return [{'instances':pred},]
+
+    def merge_result(self, results, gt_results):
+        result = results
+        tmp = copy.deepcopy(gt_results) # fields = 'gt_boxes' 'gt_classes'
+        scores = result.get('scores').cpu()
+        pred_boxes = result.get('pred_boxes').tensor.cpu()
+        pred_classes = result.get('pred_classes').cpu()
+        gt_boxes = tmp.get('gt_boxes').tensor.cpu()
+        gt_classes = tmp.get('gt_classes').cpu()
+        saved_boxes = None
+        saved_cls = None
+        # print(pred_boxes)
+        for i, score in enumerate(scores):
+            if score >= 0.8:
+                gt_boxes = torch.cat([gt_boxes, pred_boxes[i].unsqueeze(0)],dim=0)
+                gt_classes = torch.cat([gt_classes, pred_classes[i].unsqueeze(0)],dim=0)
+                if saved_boxes is None:
+                    saved_boxes = pred_boxes[i].unsqueeze(0)
+                    saved_cls = pred_classes[i].unsqueeze(0)
+                else:
+                    saved_boxes = torch.cat([saved_boxes, pred_boxes[i].unsqueeze(0)],dim=0)
+                    saved_cls = torch.cat([saved_cls, pred_classes[i].unsqueeze(0)],dim=0)
+        
+        tmp = Instances(gt_results._image_size, **{'gt_boxes': Boxes(gt_boxes), 'gt_classes': gt_classes})
+        if isinstance(saved_boxes, torch.Tensor):
+            pred = Instances(gt_results._image_size, **{'gt_boxes': Boxes(saved_boxes), 'gt_classes': saved_cls}) 
+        else:
+            pred = Instances(gt_results._image_size, **{'gt_boxes': Boxes(torch.tensor([])), 'gt_classes': torch.tensor([])}) 
+        return tmp, pred
+        
         
     def save_task_masks(self, task_masks, pre_masks=None):
         save_masks = [[x[0].detach().cpu().numpy().tolist(),] for x in task_masks]
@@ -782,7 +865,7 @@ class GeneralizedRCNNCOD(nn.Module):
             gt_news = [x['instances'].to(self.device) for x in batched_inputs]
             # gt_olds = [x['instances'].to(self.device) for x in batched_inputs]
             # gt_merges = [x['instances'].to(self.device) for x in batched_inputs]
-            
+
             features, backbone_features, task_masks = self.backbone(images.tensor, self.pre_masks)# src :[now_feat, [old_mask_feat0, old_mask_feat1..] ]
             
             pre_task_flag = len(features) >= 2
@@ -798,7 +881,7 @@ class GeneralizedRCNNCOD(nn.Module):
             for i, feature in enumerate(features): # i for task index
                 # Prepare Proposals.
                 if self.proposal_generator is not None:
-                    proposals, proposal_losses = self.proposal_generator(images, feature, gt_merge)
+                    proposals, proposal_losses = self.proposal_generator(images, feature, gt_merges)
                 else:
                     assert "proposals" in batched_inputs[0]
                     proposals = [x["proposals"].to(self.device) for x in batched_inputs]

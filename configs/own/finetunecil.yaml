@@ -1,9 +1,9 @@
 _BASE_: "../Base-RCNN-C4.yaml"
 MODEL:
-  META_ARCHITECTURE: "GeneralizedRCNN"
+  META_ARCHITECTURE: "GeneralizedRCNNDIS"
   PIXEL_MEAN: [123.675, 116.280, 103.530, 92.806, 92.806, 92.806]
   PIXEL_STD: [58.395, 57.120, 57.375, 34.796, 34.796, 34.796]
-  
+  TASK: 1
   BACKBONE:
     NAME: "build_two_resnet_fpn_backbone"
   # WEIGHTS: "detectron2://ImageNetPretrained/MSRA/R-50.pkl"
@@ -54,7 +54,7 @@ INPUT:
 VERSION: 2
 DATASETS:
   TRAIN: ('uav_rgbt_trainnovel',)
-  TEST: ('uav_rgbt_test',)
+  TEST: ('uav_rgbt_testall',)
 
 OUTPUT_DIR: ./output_ft_cil
 

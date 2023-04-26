@@ -65,7 +65,7 @@ def load_uav_rgbt_instances(dirname: str, split: str, class_names: Union[List[st
             if cls not in CLASS_NAMES:
                 continue
 
-            if CLASS_NAMES.index(cls)  > 5 and 'trainval' in split:
+            if CLASS_NAMES.index(cls)  <= 5 and 'trainnovel' in split:
                 continue
             # split data 
             

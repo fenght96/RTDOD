@@ -1013,7 +1013,6 @@ class IODROIHeads(ROIHeads):
                         losses[k] = v
             return proposals, losses, gate, pre_predictions
         else:
-            
             pre_predictions = self._forward_box(features, proposals, None, pre_mask)
             return pre_predictions
 
@@ -1084,7 +1083,6 @@ class IODROIHeads(ROIHeads):
             pre_predictions = []
             gate = None
             if cls_feat is not None:
-                
                 gate = F.relu(self.cls_fcs(cls_feat)).view(1,-1)
                 gate = F.sigmoid(self.cls_fcs1(gate))
                 predictions = self.box_predictor(box_features * gate)
@@ -1100,6 +1098,7 @@ class IODROIHeads(ROIHeads):
                         for proposals_per_image, pred_boxes_per_image in zip(proposals, pred_boxes):
                             proposals_per_image.proposal_boxes = Boxes(pred_boxes_per_image)
             else:
+                
                 for mask in pre_mask:
                     predictions = self.box_predictor(box_features * mask)
                     loss = self.box_predictor.losses(predictions, proposals)
@@ -1109,10 +1108,9 @@ class IODROIHeads(ROIHeads):
             
             return losses, div_loss, gate, pre_predictions
         else:
-            all_predictions = []
-            
+            # all_predictions = []
             predictions = self.box_predictor(box_features * pre_mask)
             pred_instances, _ = self.box_predictor.inference(predictions, proposals)
-            all_predictions.append(pred_instances)
+            # all_predictions.append(pred_instances)
             
-            return all_predictions
+            return [pred_instances,]
